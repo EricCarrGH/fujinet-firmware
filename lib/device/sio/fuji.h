@@ -28,8 +28,6 @@
 #define MAX_SSID_LEN 32
 #define MAX_WIFI_PASS_LEN 64
 
-#define MAX_APPKEY_LEN 64
-
 #define READ_DEVICE_SLOTS_DISKS1 0x00
 #define READ_DEVICE_SLOTS_TAPE 0x10
 
@@ -65,23 +63,6 @@ typedef struct
     char sBssid[18];
 } AdapterConfigExtended;
 
-enum appkey_mode : int8_t
-{
-    APPKEYMODE_INVALID = -1,
-    APPKEYMODE_READ = 0,
-    APPKEYMODE_WRITE,
-    APPKEYMODE_READ_256
-};
-
-struct appkey
-{
-    uint16_t creator = 0;
-    uint8_t app = 0;
-    uint8_t key = 0;
-    appkey_mode mode = APPKEYMODE_INVALID;
-    uint8_t reserved = 0;
-} __attribute__((packed));
-
 class sioFuji : public virtualDevice
 {
 private:
@@ -105,8 +86,6 @@ private:
     int _on_ok(bool siomode);
     int _on_error(bool siomode, int rc=-1);
 #endif
-
-    appkey _current_appkey;
 
     mbedtls_md5_context _md5;
     mbedtls_sha1_context _sha1;
@@ -182,12 +161,6 @@ protected:
     void sio_process(uint32_t commanddata, uint8_t checksum) override;
 
     void shutdown() override;
-
-    int appkey_size = 64;
-    std::map<int, int> mode_to_keysize = {
-        {0, 64},
-        {2, 256}
-    };
 
 #ifndef ESP_PLATFORM
     friend class fnHttpServiceBrowser; // allow browser to call above functions

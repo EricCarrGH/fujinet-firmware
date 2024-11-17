@@ -15,6 +15,7 @@
 #include "fnWiFi.h"
 #include "fsFlash.h"
 #include "fnFsTNFS.h"
+#include "fnAppkey.h"
 #include "utils.h"
 #include "string_utils.h"
 
@@ -529,92 +530,35 @@ void iwmFuji::iwm_ctrl_set_boot_mode()
 	boot_config = true;
 }
 
-char *_generate_appkey_filename(appkey *info)
-{
-	static char filenamebuf[30];
-
-	snprintf(filenamebuf, sizeof(filenamebuf), "/FujiNet/%04hx%02hhx%02hhx.key", info->creator, info->app, info->key);
-	return filenamebuf;
-}
-
 /*
- Opens an "app key" for reading/writing - stores appkey name for subsequent read/write calls
+ Opens an "app key" for reading/writing
 */
 void iwmFuji::iwm_ctrl_open_app_key()
 {
-	int idx = 0;
-	FILE *fp;
-	uint8_t creatorL = data_buffer[idx++];
-	uint8_t creatorM = data_buffer[idx++]; 
-	uint8_t app = data_buffer[idx++]; 
-	uint8_t key = data_buffer[idx++]; 
-	uint8_t mode = data_buffer[idx++];
-
-	snprintf(_appkeyfilename, sizeof(_appkeyfilename), "/FujiNet/%02hhx%02hhx%02hhx%02hhx.key", creatorM, creatorL, app, key);
-	Debug_printf("\r\nFuji Cmd: OPEN APPKEY %s in mode %i\n", _appkeyfilename, mode);
-
-	// If reading, we will update the control stat length for the subsequent read_app_key status call
-	if (mode == 1) return;	// write mode
-
-	// set the appkey_size according to the mode, if mode is unknown, default to 64
-	appkey_size = get_value_or_default(mode_to_keysize, mode, 64);
-
-	fp = fnSDFAT.file_open(_appkeyfilename, "r");
-	if (fp == nullptr)
+	if (Appkey.open((appkey_open_params*)data_buffer))
 	{
-		Debug_printf("iwm_ctrl_open_app_key ERROR: Could not read from SD Card.\r\n");
-
-		// Set stat buffer to 0 to signify the app key was not found
+		// Set stat buffer to 0 to signify an error occured
 		ctrl_stat_len=0;
-		return;
 	}
-
-	// don't need to do this if we're returning exact number of bytes
-	// // Clear out stat buffer before reading into it
-	// memset(ctrl_stat_buffer, 0, sizeof(ctrl_stat_buffer));
-	
-	// Read in the app key file data, to be sent in read_app_key call
-	ctrl_stat_len = fread(ctrl_stat_buffer, sizeof(char), appkey_size, fp);
-	fclose(fp);
-
 }
 
 /*
- Write an "app key" to SD (ONLY!) storage.
+ Write an "app key" to storage.
 */
 void iwmFuji::iwm_ctrl_write_app_key()
 {
-	FILE *fp;
-    std::vector<uint8_t> data(appkey_size, 0);
-    std::copy(&data_buffer[0], &data_buffer[0] + data_len, data.begin());
-
-	Debug_printf("\r\nFuji Cmd: WRITE APPKEY\n");
-
-
-	// Make sure we have a "/FujiNet" directory, since that's where we're putting these files
-	fnSDFAT.create_path("/FujiNet");
-
-	fp = fnSDFAT.file_open(_appkeyfilename, "w");
-	if (fp == nullptr)
-	{
-		Debug_printf("iwm_ctrl_write_app_key ERROR: Could not write to SD Card.\r\n");
-		return;
-	}
-
-	fwrite(data.data(), sizeof(uint8_t), data_len, fp);
-	fclose(fp);
+	Appkey.write((uint8_t*)data_buffer, data_len);
 }
-
+ 
 /*
- Read an "app key" from SD (ONLY!) storage
+ Read an "app key" from storage
 */
-void iwmFuji::iwm_stat_read_app_key() // return the app key that was just read by the open() control command
+void iwmFuji::iwm_stat_read_app_key()
 {
-	Debug_printf("\r\nFuji cmd: READ APP KEY");
+	appkey_payload* payload = Appkey.read();
 	
-	memset(data_buffer, 0, sizeof(data_buffer));
-	memcpy(data_buffer, ctrl_stat_buffer, ctrl_stat_len);
-	data_len = ctrl_stat_len;
+	memcpy(data_buffer, payload->data, payload->size);
+	data_len = payload->size;
 }
 
 // DEBUG TAPE

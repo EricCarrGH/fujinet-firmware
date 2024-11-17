@@ -19,6 +19,7 @@
 #include "fnConfig.h"
 #include "fsFlash.h"
 #include "fnWiFi.h"
+#include "fnAppkey.h"
 #include "network.h"
 #include "led.h"
 #include "siocpm.h"
@@ -1041,14 +1042,6 @@ void iecFuji::set_boot_mode(uint8_t boot_device, bool should_boot_config)
     boot_config = should_boot_config;
 }
 
-char *_generate_appkey_filename(appkey *info)
-{
-    static char filenamebuf[30];
-
-    snprintf(filenamebuf, sizeof(filenamebuf), "/FujiNet/%04hx%02hhx%02hhx.key", info->creator, info->app, info->key);
-    return filenamebuf;
-}
-
 /*
  Opens an "app key".  This just sets the needed app key parameters (creator, app, key, mode)
  for the subsequent expected read/write command. We could've added this information as part
@@ -1062,43 +1055,32 @@ void iecFuji::open_app_key_basic()
 
     if (pt.size() < 5)
     {
-        Debug_printf("Incorrect number of parameters in open_app_key_basic.\r\n");
+        Debug_println("Incorrect number of parameters in open_app_key_basic.");
         response = "invalid # of parameters";
         set_fuji_iec_status(DEVICE_ERROR, response);
         IEC.senderTimeout();
         return;
     }
 
-    // We're only supporting writing to SD, so return an error if there's no SD mounted
-    if (!fnSDFAT.running())
+    sscanf(pt[1].c_str(), "%x", &val); uint16_t creator = (uint16_t) val;
+    sscanf(pt[2].c_str(), "%x", &val); uint8_t app = (uint8_t)val;
+    sscanf(pt[3].c_str(), "%x", &val); uint8_t key = (uint8_t)val;
+    sscanf(pt[4].c_str(), "%x", &val); appkey_mode mode = (appkey_mode)val;
+    
+    // This last reserved parameter was not coded for, so making it optional for now
+    uint8_t flags = 0;
+    if (pt.size()==6)
     {
-        Debug_println("No SD mounted - returning error");
-        response = "no sd card mounted";
+        sscanf(pt[5].c_str(), "%x", &val); uint8_t flags = (uint8_t)val;
+    }
+    
+    if (Appkey.open(creator, app, key, mode, flags))
+    {
+        response = "bad creator/mode or no sd card mounted";
         set_fuji_iec_status(DEVICE_ERROR, response);
         IEC.senderTimeout();
         return;
     }
-
-    sscanf(pt[1].c_str(), "%x", &val);
-    uint16_t creator = (uint16_t) val;
-    sscanf(pt[2].c_str(), "%x", &val);
-    uint8_t app = (uint8_t)val;
-    sscanf(pt[3].c_str(), "%x", &val);
-    uint8_t key = (uint8_t)val;
-    sscanf(pt[4].c_str(), "%x", &val);
-    appkey_mode mode = (appkey_mode)val;
-
-    // Basic check for valid data
-    if (_current_appkey.creator == 0 || _current_appkey.mode == APPKEYMODE_INVALID)
-    {
-        Debug_println("Invalid app key data");
-        response = "invalid app key data";
-        set_fuji_iec_status(DEVICE_ERROR, response);
-        IEC.senderTimeout();
-        return;
-    }
-
-    open_app_key(creator, app, key, mode, 0);
 
     response = "ok";
     set_fuji_iec_status(0, response);
@@ -1106,71 +1088,41 @@ void iecFuji::open_app_key_basic()
 
 void iecFuji::open_app_key_raw()
 {
-    Debug_print("Fuji cmd: OPEN APPKEY\r\n");
-    if (!fnSDFAT.running())
-    {
-        Debug_println("No SD mounted - returning error");
-        set_fuji_iec_status(DEVICE_ERROR, "no sd card mounted");
-        IEC.senderTimeout();
-        return;
-    }
-    
     uint16_t creator = payload[0] | (payload[1] << 8);
     uint8_t app = payload[2];
     uint8_t key = payload[3];
     appkey_mode mode = (appkey_mode) payload[4];
     uint8_t reserved = payload[5];
 
-    open_app_key(creator, app, key, mode, reserved);
+    if (Appkey.open(creator, app, key, mode, reserved))
+    {
+        set_fuji_iec_status(DEVICE_ERROR, "bad creator/mode or no sd card mounted");
+        IEC.senderTimeout();
+        return;
+    }
+
     set_fuji_iec_status(0, "");
 }
 
-void iecFuji::open_app_key(uint16_t creator, uint8_t app, uint8_t key, appkey_mode mode, uint8_t reserved)
-{
-    _current_appkey.creator = creator;
-    _current_appkey.app = app;
-    _current_appkey.key = key;
-    _current_appkey.mode = mode;
-    _current_appkey.reserved = reserved;
-
-    Debug_printf("App key creator = 0x%04hx, app = 0x%02hhx, key = 0x%02hhx, mode = %hhu, filename = \"%s\"\r\n",
-                 _current_appkey.creator, _current_appkey.app, _current_appkey.key, _current_appkey.mode,
-                 _generate_appkey_filename(&_current_appkey));
-
-}
 
 void iecFuji::close_app_key_basic()
 {
-    close_app_key();
+    Appkey.close();
     response = "ok";
     set_fuji_iec_status(0, response);
 }
 
 void iecFuji::close_app_key_raw()
 {
-    close_app_key();
+    Appkey.close();
     set_fuji_iec_status(0, "");
-}
-
-/*
-  The app key close operation is a placeholder in case we want to provide more robust file
-  read/write operations. Currently, the file is closed immediately after the read or write operation.
-*/
-void iecFuji::close_app_key()
-{
-    Debug_print("Fuji cmd: CLOSE APPKEY\r\n");
-    _current_appkey.creator = 0;
-    _current_appkey.mode = APPKEYMODE_INVALID;
-}
-
-bool iecFuji::check_appkey_creator(bool check_is_write)
-{
-    return !(_current_appkey.creator == 0 || (check_is_write && _current_appkey.mode != APPKEYMODE_WRITE));
 }
 
 void iecFuji::write_app_key_basic()
 {
     // In BASIC, the key length is specified in the parameters.
+    // Eric - Can we remove key length? Why is it needed?
+
     if (pt.size() <= 2)
     {
         response = "invalid # of parameters";
@@ -1179,44 +1131,18 @@ void iecFuji::write_app_key_basic()
         return;
     }
 
-    if (!check_appkey_creator(true))
-    {
-        Debug_println("Invalid app key metadata - aborting");
-        response = "malformed appkey data.";
-        set_fuji_iec_status(DEVICE_ERROR, response);
-        IEC.senderTimeout();
-        return;
-    }
-
-    if (!fnSDFAT.running())
-    {
-        Debug_println("No SD mounted - can't write app key");
-        response = "no sd card mounted";
-        set_fuji_iec_status(DEVICE_ERROR, response);
-        IEC.senderTimeout();
-        return;
-    }
+    // Not used
+    // int keylen = atoi(pt[1].c_str());
 
     // Tokenize the raw payload to save to the file - WE MAKE NO CHANGES TO DATA, the host sends raw values
     std::vector<std::string> ptRaw;
     ptRaw = tokenize_basic_command(payloadRaw);
-
-    // do we need keylen anymore?
-    int keylen = atoi(pt[1].c_str());
     
-    // Bounds check
-    if (keylen > MAX_APPKEY_LEN)
-        keylen = MAX_APPKEY_LEN;
-
     std::vector<uint8_t> key_data(ptRaw[2].begin(), ptRaw[2].end());
-    int write_size = key_data.size();
 
-    int count = write_app_key(std::move(key_data));
-    if (count != write_size) {
-        int e = errno;
-        std::ostringstream oss;
-        oss << "error: only wrote " << count << " bytes of expected " << write_size << ", errno=" << e;
-        response = oss.str();
+    if (Appkey.write(key_data))
+    {
+        response = "error writing appkey";
         set_fuji_iec_status(DEVICE_ERROR, response);
         IEC.senderTimeout();
         return;
@@ -1229,67 +1155,15 @@ void iecFuji::write_app_key_basic()
 
 void iecFuji::write_app_key_raw()
 {
-    if (!check_appkey_creator(true))
-    {
-        set_fuji_iec_status(DEVICE_ERROR, "creator information missing");
-        IEC.senderTimeout();
-        return;
-    }
-    if (!fnSDFAT.running())
-    {
-        set_fuji_iec_status(DEVICE_ERROR, "sd filesystem not running");
-        IEC.senderTimeout();
-        return;
-    }
-
-    // we can't write more than the appkey_size, which is set by the mode.
-    // May have to change this later as per Eric's comments in discord.
-    size_t write_size = payload.size();
-    if (write_size > appkey_size)
-    {
-        Debug_printf("ERROR: key data sent was larger than keysize. Aborting rather than potentially corrupting existing data.");
-        set_fuji_iec_status(DEVICE_ERROR, "too much data for appkey");
-        IEC.senderTimeout();
-        return;
-    }
-
     std::vector<uint8_t> key_data(payload.begin(), payload.end());
-    Debug_printf("key_data: \r\n%s\r\n", util_hexdump(key_data.data(), key_data.size()).c_str());
-    int count = write_app_key(std::move(key_data));
-    if (count != write_size) {
-        int e = errno;
-        std::ostringstream oss;
-        oss << "error: only wrote " << count << " bytes of expected " << write_size << ", errno=" << e;
-        set_fuji_iec_status(DEVICE_ERROR, oss.str());
+    if (Appkey.write(key_data))
+    {
+        set_fuji_iec_status(DEVICE_ERROR, "error writing appkey");
         IEC.senderTimeout();
         return;
     }
 
     set_fuji_iec_status(0, "");
-}
-
-int iecFuji::write_app_key(std::vector<uint8_t>&& value)
-{
-    char *filename = _generate_appkey_filename(&_current_appkey);
-
-    // Reset the app key data so we require calling APPKEY OPEN before another attempt
-    _current_appkey.creator = 0;
-    _current_appkey.mode = APPKEYMODE_INVALID;
-
-    Debug_printf("Writing appkey to \"%s\"\r\n", filename);
-
-    // Make sure we have a "/FujiNet" directory, since that's where we're putting these files
-    fnSDFAT.create_path("/FujiNet");
-
-    FILE *fOut = fnSDFAT.file_open(filename, FILE_WRITE);
-    if (fOut == nullptr)
-    {
-        Debug_printf("Failed to open/create output file: errno=%d\n", errno);
-        return -1;
-    }
-    size_t count = fwrite(value.data(), 1, value.size(), fOut);
-    fclose(fOut);
-    return count;
 }
 
 /*
@@ -1297,107 +1171,35 @@ int iecFuji::write_app_key(std::vector<uint8_t>&& value)
 */
 void iecFuji::read_app_key_basic()
 {
-    Debug_println("Fuji cmd: READ APPKEY");
+    appkey_payload* payload = Appkey.read();
 
-    // Make sure we have an SD card mounted
-    if (!fnSDFAT.running())
+    if (payload->size == 0)
     {
-        Debug_println("No SD mounted - can't read app key");
-        response = "no sd mounted";
-        set_fuji_iec_status(DEVICE_ERROR, response);
-        IEC.senderTimeout();
-        return;
-    }
-
-    // Make sure we have valid app key information
-    if (_current_appkey.creator == 0 || _current_appkey.mode != APPKEYMODE_READ)
-    {
-        Debug_println("Invalid app key metadata - aborting");
-        response = "invalid appkey metadata";
-        set_fuji_iec_status(DEVICE_ERROR, response);
-        IEC.senderTimeout();
-        return;
-    }
-
-    char *filename = _generate_appkey_filename(&_current_appkey);
-    Debug_printf("Reading appkey from \"%s\"\r\n", filename);
-
-    std::vector<uint8_t> response_data;
-    if (read_app_key(filename, response_data) == -1) {
-        Debug_println("Failed to read appkey file");
         response = "failed to read appkey file";
         set_fuji_iec_status(DEVICE_ERROR, response);
         IEC.senderTimeout();
         return;
     }
 
-// use ifdef to guard against calling hexdump if we're not using debug
-#ifdef DEBUG
-	Debug_printf("appkey data:\r\n%s\r\n", util_hexdump(response_data.data(), response_data.size()).c_str());
-#endif
-
-    response.assign(response_data.begin(), response_data.end());
+    response.assign(&payload->data[0], &payload->data[payload->size]);
     set_fuji_iec_status(0, "ok");
 }
 
 
 void iecFuji::read_app_key_raw()
 {
-    if (!fnSDFAT.running())
-    {
-        Debug_println("No SD mounted - can't read app key");
-        set_fuji_iec_status(DEVICE_ERROR, "sd card not mounted");
+   appkey_payload* payload = Appkey.read();
+
+    if (payload->size == 0)
+    {   set_fuji_iec_status(DEVICE_ERROR, "failed to read appkey file");
         IEC.senderTimeout();
         return;
     }
 
-    // Make sure we have valid app key information
-    if (_current_appkey.creator == 0 || _current_appkey.mode != APPKEYMODE_READ)
-    {
-        Debug_println("Invalid app key metadata - aborting");
-        set_fuji_iec_status(DEVICE_ERROR, "invalid appkey meta data");
-        IEC.senderTimeout();
-        return;
-    }
-
-    char *filename = _generate_appkey_filename(&_current_appkey);
-    Debug_printf("Reading appkey from \"%s\"\r\n", filename);
-
-    if (read_app_key(filename, responseV) == -1) {
-        Debug_println("Failed to read appkey file");
-        set_fuji_iec_status(DEVICE_ERROR, "failed to read appkey file");
-        IEC.senderTimeout();
-        return;
-    }
-
-// use ifdef to guard against calling hexdump if we're not using debug
-#ifdef DEBUG
-	Debug_printf("appkey data:\r\n%s\r\n", util_hexdump(responseV.data(), responseV.size()).c_str());
-#endif
-
+    responseV.assign(&payload->data[0], &payload->data[payload->size]);
+    //responseV.resize(payload->size);
+    //memcpy(responseV.data(), payload->data, responseV.size());
     set_fuji_iec_status(0, "");
-}
-
-int iecFuji::read_app_key(char *filename, std::vector<uint8_t>& file_data)
-{
-    FILE *fIn = fnSDFAT.file_open(filename, "r");
-    if (fIn == nullptr)
-    {
-        std::ostringstream oss;
-        oss << "Failed to open input file: errno=" << errno;
-        response = oss.str();
-        set_fuji_iec_status(DEVICE_ERROR, response);
-        IEC.senderTimeout();
-        return -1;
-    }
-
-    file_data.resize(appkey_size);
-    size_t count = fread(file_data.data(), 1, file_data.size(), fIn);
-    file_data.resize(count);
-    Debug_printf("Read %u bytes from input file\n", (unsigned)count);
-    fclose(fIn);
-
-    return count;
 }
 
 void iecFuji::disk_image_umount_basic()
@@ -2250,7 +2052,7 @@ std::string iecFuji::get_host_prefix(int host_slot)
 
 /* @brief Tokenizes the payload command and parameters.
  Example: "COMMAND:Param1,Param2" will return a vector of [0]="COMMAND", [1]="Param1",[2]="Param2"
- Also supports "COMMAND,Param1,Param2"
+ Also supports "COMMAND,Param1,Param2" for backwards compatability
 */
 vector<string> iecFuji::tokenize_basic_command(string command)
 {

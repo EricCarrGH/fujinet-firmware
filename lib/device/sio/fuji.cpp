@@ -25,6 +25,7 @@
 #include "fsFlash.h"
 #include "fnFsTNFS.h"
 #include "fnWiFi.h"
+#include "fnAppkey.h"
 
 #include "led.h"
 #include "utils.h"
@@ -765,14 +766,6 @@ void sioFuji::sio_set_boot_mode()
     sio_complete();
 }
 
-char *_generate_appkey_filename(appkey *info)
-{
-    static char filenamebuf[30];
-
-    snprintf(filenamebuf, sizeof(filenamebuf), "/FujiNet/%04hx%02hhx%02hhx.key", info->creator, info->app, info->key);
-    return filenamebuf;
-}
-
 /*
  Opens an "app key".  This just sets the needed app key parameters (creator, app, key, mode)
  for the subsequent expected read/write command. We could've added this information as part
@@ -784,36 +777,17 @@ void sioFuji::sio_open_app_key()
 {
     Debug_print("Fuji cmd: OPEN APPKEY\n");
 
-    // The data expected for this command
-    uint8_t ck = bus_to_peripheral((uint8_t *)&_current_appkey, sizeof(_current_appkey));
+    // Read in appkey open parameters
+    appkey_open_params *appkey =  Appkey.get_open_params_buffer();
+    uint8_t ck = bus_to_peripheral((uint8_t *)appkey, sizeof(appkey_open_params));
 
-    if (sio_checksum((uint8_t *)&_current_appkey, sizeof(_current_appkey)) != ck)
+    if (
+        sio_checksum((uint8_t *)appkey, sizeof(appkey_open_params)) != ck ||
+        Appkey.open())
     {
         sio_error();
         return;
     }
-
-    // We're only supporting writing to SD, so return an error if there's no SD mounted
-    if (fnSDFAT.running() == false)
-    {
-        Debug_println("No SD mounted - returning error");
-        sio_error();
-        return;
-    }
-
-    // Basic check for valid data
-    if (_current_appkey.creator == 0 || _current_appkey.mode == APPKEYMODE_INVALID)
-    {
-        Debug_println("Invalid app key data");
-        sio_error();
-        return;
-    }
-
-    appkey_size = get_value_or_default(mode_to_keysize,  _current_appkey.mode, 64);
-
-    Debug_printf("App key creator = 0x%04hx, app = 0x%02hhx, key = 0x%02hhx, mode = %hhu, filename = \"%s\"\n",
-                 _current_appkey.creator, _current_appkey.app, _current_appkey.key, _current_appkey.mode,
-                 _generate_appkey_filename(&_current_appkey));
 
     sio_complete();
 }
@@ -824,135 +798,49 @@ void sioFuji::sio_open_app_key()
 */
 void sioFuji::sio_close_app_key()
 {
-    Debug_print("Fuji cmd: CLOSE APPKEY\n");
-    _current_appkey.creator = 0;
-    _current_appkey.mode = APPKEYMODE_INVALID;
+    Appkey.close();
     sio_complete();
 }
 
 /*
- Write an "app key" to SD (ONLY!) storage.
+ Write an "app key" to storage
 */
 void sioFuji::sio_write_app_key()
-{
-    uint16_t keylen = UINT16_FROM_HILOBYTES(cmdFrame.aux2, cmdFrame.aux1);
-    // std::copy(&data_buffer[0], &data_buffer[0] + keylen, data.begin());
+{   
+    uint16_t size = UINT16_FROM_HILOBYTES(cmdFrame.aux2, cmdFrame.aux1);
 
-    Debug_printf("Fuji cmd: WRITE APPKEY (keylen = %hu)\n", keylen);
+    // SIO sends in a block of 64 right now regardless of appkey payload size
+    std::vector<uint8_t> buffer = Appkey.get_write_buffer(64);
 
-    std::vector<uint8_t> value(appkey_size, 0);
-
-    uint8_t ck = bus_to_peripheral((uint8_t *)value.data(), value.size());
-    if (sio_checksum(value.data(), value.size()) != ck)
+    uint8_t ck = bus_to_peripheral(buffer.data(), buffer.size());
+    if (sio_checksum(buffer.data(), buffer.size()) != ck)
     {
         // apc: don't send 'E' on checksum error, 'N' was sent already
         // sio_error();
         return;
     }
+    
+    // Shrink to the actual size of the payload
+    buffer.resize(size);
 
-    // Make sure we have valid app key information
-    if (_current_appkey.creator == 0 || _current_appkey.mode != APPKEYMODE_WRITE)
+    if (Appkey.write(buffer))
     {
-        Debug_println("Invalid app key metadata - aborting");
         sio_error();
         return;
-    }
-
-    // Make sure we have an SD card mounted
-    if (fnSDFAT.running() == false)
-    {
-        Debug_println("No SD mounted - can't write app key");
-        sio_error();
-        return;
-    }
-
-    char *filename = _generate_appkey_filename(&_current_appkey);
-
-    // Reset the app key data so we require calling APPKEY OPEN before another attempt
-    _current_appkey.creator = 0;
-    _current_appkey.mode = APPKEYMODE_INVALID;
-
-    Debug_printf("Writing appkey to \"%s\"\n", filename);
-
-    // Make sure we have a "/FujiNet" directory, since that's where we're putting these files
-    fnSDFAT.create_path("/FujiNet");
-
-    FILE *fOut = fnSDFAT.file_open(filename, FILE_WRITE);
-    if (fOut == nullptr)
-    {
-        Debug_printf("Failed to open/create output file: errno=%d\n", errno);
-        sio_error();
-        return;
-    }
-    size_t count = fwrite(value.data(), 1, keylen, fOut);
-    int e = errno;
-
-    fclose(fOut);
-
-    if (count != keylen)
-    {
-        Debug_printf("Only wrote %u bytes of expected %hu, errno=%d\n", (unsigned)count, keylen, e);
-        sio_error();
     }
 
     sio_complete();
 }
 
-size_t read_file_into_vector(FILE* fIn, std::vector<uint8_t>& response_data, size_t size) {
-    response_data.resize(size + 2);
-    size_t bytes_read = fread(response_data.data() + 2, 1, size, fIn);
-
-    // Insert the size at the beginning of the vector
-    response_data[0] = static_cast<uint8_t>(bytes_read & 0xFF); // Low byte of the size
-    response_data[1] = static_cast<uint8_t>((bytes_read >> 8) & 0xFF); // High byte of the size
-    return bytes_read;
-}
-
 /*
- Read an "app key" from SD (ONLY!) storage
+ Read an "app key"
 */
 void sioFuji::sio_read_app_key()
 {
-    Debug_println("Fuji cmd: READ APPKEY");
-    std::vector<uint8_t> response_data(appkey_size + 2);
+    appkey_payload* payload = Appkey.read();
 
-    // Make sure we have an SD card mounted
-    if (fnSDFAT.running() == false)
-    {
-        Debug_println("No SD mounted - can't read app key");
-        bus_to_computer(response_data.data(), response_data.size(), true);
-        return;
-    }
-
-    // Make sure we have valid app key information, and the mode is not WRITE
-    if (_current_appkey.creator == 0 || _current_appkey.mode == APPKEYMODE_WRITE)
-    {
-        Debug_println("Invalid app key metadata - aborting");
-        bus_to_computer(response_data.data(), response_data.size(), true);
-        return;
-    }
-
-    char *filename = _generate_appkey_filename(&_current_appkey);
-    Debug_printf("Reading appkey from \"%s\"\n", filename);
-
-    FILE *fIn = fnSDFAT.file_open(filename, FILE_READ);
-    if (fIn == nullptr)
-    {
-        Debug_printf("Failed to open input file: errno=%d\n", errno);
-        bus_to_computer(response_data.data(), response_data.size(), true);
-        return;
-    }
-
-    size_t count = read_file_into_vector(fIn, response_data, appkey_size);
-    Debug_printf("Read %u bytes from input file\n", (unsigned)count);
-    fclose(fIn);
-
-#ifdef DEBUG
-	std::string msg = util_hexdump(response_data.data(), appkey_size);
-	Debug_printf("%s\n", msg.c_str());
-#endif
-
-    bus_to_computer(response_data.data(), response_data.size(), false);
+    // Write back the size (2 bytes), followed by 64 bytes (regardless of size)
+    bus_to_computer((uint8_t*)payload, 64+2, payload->size == 0);
 }
 
 // DEBUG TAPE

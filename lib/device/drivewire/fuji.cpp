@@ -17,6 +17,7 @@
 #include "fnConfig.h"
 #include "fsFlash.h"
 #include "fnWiFi.h"
+#include "fnAppkey.h"
 
 #include "led.h"
 #include "utils.h"
@@ -544,14 +545,6 @@ void drivewireFuji::set_boot_mode()
     boot_config = true;
 }
 
-char *_generate_appkey_filename(appkey *info)
-{
-    static char filenamebuf[30];
-
-    snprintf(filenamebuf, sizeof(filenamebuf), "/FujiNet/%04hx%02hhx%02hhx.key", info->creator, info->app, info->key);
-    return filenamebuf;
-}
-
 /*
  Opens an "app key".  This just sets the needed app key parameters (creator, app, key, mode)
  for the subsequent expected read/write command. We could've added this information as part
@@ -561,34 +554,19 @@ char *_generate_appkey_filename(appkey *info)
 */
 void drivewireFuji::open_app_key()
 {
-    Debug_print("Fuji cmd: OPEN APPKEY\n");
-
-    fnDwCom.readBytes((uint8_t *)&_current_appkey, sizeof(_current_appkey));
+    appkey_open_params *appkey =  Appkey.get_open_params_buffer();
+    fnDwCom.readBytes((uint8_t *)appkey, sizeof(appkey_open_params));
 
     // Endian swap
-    uint16_t tmp = _current_appkey.creator;
-    _current_appkey.creator = tmp >> 8 | tmp << 8;
+    appkey->creator = htons(appkey->creator);
 
-    // Basic check for valid data
-    if (_current_appkey.creator == 0 || _current_appkey.mode == APPKEYMODE_INVALID)
+    if (Appkey.open())
     {
-        Debug_println("Invalid app key data");
-        errorCode = 144;
-        return;
-    }
-
-    if (fnSDFAT.running() == false)
-    {
-        Debug_println("No SD mounted - returning error");
         errorCode = 144;
         return;
     }
 
     errorCode = 1;
-
-    Debug_printf("App key creator = 0x%04hx, app = 0x%02hhx, key = 0x%02hhx, mode = %hhu, filename = \"%s\"\n",
-                _current_appkey.creator, _current_appkey.app, _current_appkey.key, _current_appkey.mode,
-                _generate_appkey_filename(&_current_appkey));
 }
 
 /*
@@ -597,118 +575,50 @@ void drivewireFuji::open_app_key()
 */
 void drivewireFuji::close_app_key()
 {
-    Debug_print("Fuji cmd: CLOSE APPKEY\n");
-    _current_appkey.creator = 0;
-    _current_appkey.mode = APPKEYMODE_INVALID;
+    Appkey.close();
     errorCode = 1;
 }
 
 /*
- Write an "app key" to SD (ONLY!) storage.
+ Write an "app key" to storage.
 */
 void drivewireFuji::write_app_key()
 {
     uint8_t lenh = fnDwCom.read();
     uint8_t lenl = fnDwCom.read();
     uint16_t len = lenh << 8 | lenl;
-    uint8_t value[MAX_APPKEY_LEN];
 
-    memset(value,0,sizeof(value));
+    std::vector<uint8_t> buffer = Appkey.get_write_buffer(len);
+    fnDwCom.readBytes(buffer.data(), len);
 
-    fnDwCom.readBytes(value, len);
-
-    // Make sure we have valid app key information
-    if (_current_appkey.creator == 0 || _current_appkey.mode != APPKEYMODE_WRITE)
+    if (Appkey.write(buffer))
     {
-        Debug_println("Invalid app key metadata - aborting");
         errorCode = 144;
         return;
     }
-
-    // Make sure we have an SD card mounted
-    if (fnSDFAT.running() == false)
-    {
-        Debug_println("No SD mounted - can't write app key");
-        errorCode = 144;
-        return;
-    }
-
-    char *filename = _generate_appkey_filename(&_current_appkey);
-
-    // Reset the app key data so we require calling APPKEY OPEN before another attempt
-    _current_appkey.creator = 0;
-    _current_appkey.mode = APPKEYMODE_INVALID;
-
-    Debug_printf("Writing appkey to \"%s\"\n", filename);
-
-    // Make sure we have a "/FujiNet" directory, since that's where we're putting these files
-    fnSDFAT.create_path("/FujiNet");
-
-    FILE *fOut = fnSDFAT.file_open(filename, "w");
-    if (fOut == nullptr)
-    {
-        Debug_printf("Failed to open/create output file: errno=%d\n", errno);
-        errorCode = 144;
-        return;
-    }
-    size_t count = fwrite(value, 1, len, fOut);
-    int e = errno;
-
-    fclose(fOut);
-
-    if (count != len)
-    {
-        Debug_printf("Only wrote %u bytes of expected %hu, errno=%d\n", count, len, e);
-        errorCode = 144;
-    }
+    
     errorCode = 1;
 }
 
 /*
- Read an "app key" from SD (ONLY!) storage
+ Read an "app key" from storage
 */
 void drivewireFuji::read_app_key()
 {
-    Debug_println("Fuji cmd: READ APPKEY");
+    appkey_payload* payload = Appkey.read();
 
-    // Make sure we have an SD card mounted
-    if (fnSDFAT.running() == false)
+    if (payload->size == 0)
     {
-        Debug_println("No SD mounted - can't read app key");
         errorCode = 144;
         return;
     }
 
-    // Make sure we have valid app key information
-    if (_current_appkey.creator == 0 || _current_appkey.mode != APPKEYMODE_READ)
-    {
-        Debug_println("Invalid app key metadata - aborting");
-        errorCode = 144;
-        return;
-    }
-
-    char *filename = _generate_appkey_filename(&_current_appkey);
-
-    Debug_printf("Reading appkey from \"%s\"\n", filename);
-
-    FILE *fIn = fnSDFAT.file_open(filename, "r");
-    if (fIn == nullptr)
-    {
-        Debug_printf("Failed to open input file: errno=%d\n", errno);
-        errorCode = 144;
-        return;
-    }
-
-    std::vector<uint8_t> buffer(MAX_APPKEY_LEN);
-    size_t count = fread(buffer.data(), 1, buffer.size(), fIn);
-    fclose(fIn);
-    Debug_printf("Read %d bytes from input file\n", count);
-    
-    uint16_t sizeNetOrder = htons(count);
+    // Endian swap for payload size
+    uint16_t sizeNetOrder = htons(payload->size);
 
     response.clear();
     response.append(reinterpret_cast<char*>(&sizeNetOrder), sizeof(sizeNetOrder));
-    response.append(reinterpret_cast<char*>(buffer.data()), count);
+    response.append(reinterpret_cast<char*>(payload->data), payload->size);
 
     errorCode = 1;
 }

@@ -19,9 +19,6 @@
 #define MAX_DISK_DEVICES 8
 #define MAX_NETWORK_DEVICES 4
 
-// only in BASIC:
-#define MAX_APPKEY_LEN 64
-
 typedef struct
 {
     char ssid[33];
@@ -55,23 +52,6 @@ typedef struct
     char sBssid[18];
 } AdapterConfigExtended;
 
-enum appkey_mode : int8_t
-{
-    APPKEYMODE_INVALID = -1,
-    APPKEYMODE_READ = 0,
-    APPKEYMODE_WRITE,
-    APPKEYMODE_READ_256
-};
-
-struct appkey
-{
-    uint16_t creator = 0;
-    uint8_t app = 0;
-    uint8_t key = 0;
-    appkey_mode mode = APPKEYMODE_INVALID;
-    uint8_t reserved = 0;
-} __attribute__((packed));
-
 typedef struct
 {
     char ssid[33];
@@ -100,8 +80,6 @@ private:
     uint8_t bootMode = 0; // Boot mode 0 = CONFIG, 1 = MINI-BOOT
 
     uint8_t _countScannedSSIDs = 0;
-
-    appkey _current_appkey;
 
     AdapterConfig cfg;
 
@@ -263,22 +241,18 @@ protected:
     void set_external_clock();
     
     // 0xDE
-    int write_app_key(std::vector<uint8_t>&& value);
     void write_app_key_basic();
     void write_app_key_raw();
 
     // 0xDD
-    int read_app_key(char *filename, std::vector<uint8_t>& file_data);
     void read_app_key_basic();
     void read_app_key_raw();
 
     // 0xDC
-    void open_app_key(uint16_t creator, uint8_t app, uint8_t key, appkey_mode mode, uint8_t reserved);
     void open_app_key_basic();
     void open_app_key_raw();
 
     // 0xDB
-    void close_app_key();
     void close_app_key_basic();
     void close_app_key_raw();
     
@@ -337,13 +311,6 @@ protected:
 #endif
 
     void shutdown() override;
-
-    int appkey_size = 64;
-    std::map<int, int> mode_to_keysize = {
-        {0, 64},
-        {2, 256}
-    };
-    bool check_appkey_creator(bool check_is_write);
 
     /**
      * @brief called to process command either at open or listen

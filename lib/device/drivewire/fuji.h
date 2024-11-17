@@ -27,8 +27,6 @@
 #define MAX_SSID_LEN 32
 #define MAX_WIFI_PASS_LEN 64
 
-#define MAX_APPKEY_LEN 64
-
 #define READ_DEVICE_SLOTS_DISKS1 0x00
 #define READ_DEVICE_SLOTS_TAPE 0x10
 
@@ -64,23 +62,6 @@ typedef struct
     char sBssid[18];
 } AdapterConfigExtended;
 
-enum appkey_mode : int8_t
-{
-    APPKEYMODE_INVALID = -1,
-    APPKEYMODE_READ = 0,
-    APPKEYMODE_WRITE,
-    APPKEYMODE_READ_256
-};
-
-struct appkey
-{
-    uint16_t creator = 0;
-    uint8_t app = 0;
-    uint8_t key = 0;
-    appkey_mode mode = APPKEYMODE_INVALID;
-    uint8_t reserved = 0;
-} __attribute__((packed));
-
 class drivewireFuji : public virtualDevice
 {
 private:
@@ -111,8 +92,6 @@ private:
     uint8_t bootMode = 0; // Boot mode 0 = CONFIG, 1 = MINI-BOOT
 
     uint8_t _countScannedSSIDs = 0;
-
-    appkey _current_appkey;
 
 protected:
     void reset_fujinet();          // 0xFF
